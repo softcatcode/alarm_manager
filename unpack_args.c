@@ -1,53 +1,131 @@
-#include <stdio.h>
-#include <string.h>
-#include <time.h>
-#include <linux/vmalloc.h>
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/slab.h>
+#include <linux/string.h>
+#include <linux/time.h>
+#include <linux/errno.h>
 #include "unpack_args.h"
 
-struct task_args *unpack_args(char args_line[STR_LEN]) {
-    struct task_args *result = kmalloc(sizeof(struct task_args), GFP_KERNEL);
-    if (result == NULL) {
-        perror("vmalloc error");
-        return NULL;
-    }
-    
-    const char *delim = ", ";
-    char *path = strtok(args_line, delim);
-    size_t n = strlen(path);
-    if (path == NULL || n >= PATH_LEN) {
-        perror("strtok failed or path is too long");
-        return NULL;
-    }
-    memcpy(result->path, path, n + 1);
-    
-    char date_time[DATE_TIME_LEN] = { 0 };
-    const char *date = strtok(NULL, delim);
-    if (date == NULL || strlen(date) != 10) {
-        perror("strtok failed or date format is incorrect");
-        return NULL;
-    }
-    memcpy(date_time, date, 10);
-    date_time[10] = ' ';
-    const char *time = strtok(NULL, delim);
-    if (time == NULL || strlen(time) != 8) {
-        perror("strtok failed or time format is incorrect");
-        return NULL;
-    }
-    memcpy(date_time + 11, time, 8);
-        
-    struct tm t = { .tm_isdst = -1 };
-    if (strptime(date_time, "%Y-%m-%d %H:%M:%S", &t) == NULL) {
-        perror("strptime failed");
-        return NULL;
-    }
-    result->t = mktime(&t);
-    return result;
+static int parse_date(const char *date_str, struct tm *tm)
+{
+	char year_str[5] = { date_str[0], date_str[1], date_str[2], date_str[3], '\0' };
+    char mon_str[3]  = { date_str[5], date_str[6], '\0' };
+    char day_str[3]  = { date_str[8], date_str[9], '\0' };
+	
+    if (strlen(date_str) != 10)
+        return -EINVAL;
+
+    // Формат: YYYY-MM-DD
+    if (date_str[4] != '-' || date_str[7] != '-')
+        return -EINVAL;
+
+    if (kstrtouint(year_str, 10, (unsigned int *)&tm->tm_year) != 0 ||
+        kstrtouint(mon_str, 10, (unsigned int *)&tm->tm_mon) != 0 ||
+        kstrtouint(day_str, 10, (unsigned int *)&tm->tm_mday) != 0)
+        return -EINVAL;
+
+    return 0;
 }
 
-int main(void) {
-    char args_line[STR_LEN] = "path/to/prog.exe 2025-12-01 15:32:14";
-    args = unpack_args(args_line);
-    printf("%ld\n", args->t);
-    puts(args->path);
+static int parse_time(const char *s, struct tm *tm)
+{
+	// s == "HH:MM:SS"
+    tm->tm_hour = (s[0] - '0') * 10 + s[1] - '0';
+    tm->tm_min = (s[3] - '0') * 10 + s[4] - '0';
+    tm->tm_sec = (s[6] - '0') * 10 + s[7] - '0';
     return 0;
+}
+
+static void split_to_arguments(char *arguments, char **path, char **date ,char **time)
+{
+	size_t n;
+	size_t i;
+	
+	*path = *date = *time = NULL;
+    if (arguments == NULL)
+		return;
+	
+	// Вычисление длины строки, содержащей аргументы.
+	n = 0;
+	while (n < ARGS_LEN && arguments[n] != 0)
+		n++;
+	if (n > ARGS_LEN || (n == ARGS_LEN && arguments[n - 1] != 0))
+		return;
+	
+	// Все пробельные символы заменяются нулями.
+	for (i = 0; i < n; i++)
+		if (arguments[i] == ' ' || arguments[i] == '\t')
+			arguments[i] = 0;
+	
+	// Осталось найти положение аргументов в строке arguments.
+    for (; n > 0 && *arguments == 0; n--)
+		arguments++;
+	if (n == 0)
+		return;
+	*path = arguments;
+	for (; *arguments != 0; n--)
+		arguments++;
+	for (; n > 0 && *arguments == 0; n--)
+		arguments++;
+	if (n == 0)
+		return;
+	*date = arguments;
+	for (; *arguments != 0; n--)
+		arguments++;
+	for (; n > 0 && *arguments == 0; n--)
+		arguments++;
+	if (n == 0)
+		return;
+	*time = arguments;
+}
+
+struct task_args *unpack_args(char *args_line)
+{
+	struct task_args *result;
+	size_t path_len;
+	char *path_arg;
+	char *date_arg;
+	char *time_arg;
+	struct tm tm;
+	
+    if (!args_line)
+        return NULL;
+    result = kmalloc(sizeof(*result), GFP_KERNEL);
+    if (!result) {
+        printk(KERN_INFO "++ unpack_args: failed to allocate memory for task_args\n");
+        return NULL;
+    }
+
+    split_to_arguments(args_line, &path_arg, &date_arg, &time_arg);
+    if (path_arg == NULL || date_arg == NULL || time_arg == NULL) {
+		printk(KERN_INFO "++ unpack_args: arguments format is incorrect\n");
+		goto fail;
+	}
+	
+	path_len = strnlen(path_arg, PATH_LEN);
+	memcpy(result->path, path_arg, path_len);
+	result->path[path_len] = 0;
+    
+    memset(&tm, 0, sizeof(struct tm));
+    if (parse_date(date_arg, &tm) != 0) {
+        printk(KERN_INFO "++ unpack_args: date format is incorrect\n");
+        goto fail;
+    }
+    if (parse_time(time_arg, &tm) != 0) {
+        printk(KERN_INFO "++ unpack_args: invalid time format (expected HH:MM:SS)\n");
+        goto fail;
+    }
+    
+    result->t = mktime64(tm.tm_year, tm.tm_mon, tm.tm_mday,
+                         tm.tm_hour, tm.tm_min, tm.tm_sec);
+    if (result->t < 0) {
+        printk(KERN_INFO "++ unpack_args: mktime64 failed (invalid date/time)\n");
+        goto fail;
+    }
+
+    return result;
+
+fail:
+    kfree(result);
+    return NULL;
 }
