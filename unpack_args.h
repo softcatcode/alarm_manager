@@ -5,11 +5,11 @@
 #define PATH_LEN       128
 #define DATE_TIME_LEN  20  // "YYYY-MM-DD HH:MM:SS" + '\0'
 
-struct task_args {
+struct alarm_args {
     char path[PATH_LEN];
     time64_t t;
 };
 
-struct task_args *unpack_args(char *args_line);
+int unpack_args(char *args_line, struct alarm_args *result);
 
 #endif

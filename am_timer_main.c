@@ -7,9 +7,8 @@
 #include <linux/ktime.h>
 #include <linux/vmalloc.h>
 #include <linux/proc_fs.h>
-#include <linux/kthread.h>
 #include <linux/sched.h>
-#include <linux/delay.h>
+#include <linux/hrtimer.h>
 #include "unpack_args.h"
 
 #define FILENAME "amFile"
@@ -18,55 +17,56 @@
 
 static bool alarm_triggered;
 static char args_buffer[ARGS_BUF_SIZE];
-static struct task_args *args = NULL;
-static struct task_struct *alarm_thread = NULL;
+static struct alarm_args args;
 static struct proc_dir_entry *proc_file;
 static struct proc_dir_entry *proc_dir;
-static bool read_flag = false;
+static bool read_flag;
+static struct hrtimer htimer;
 
-void exec_task(void) {
+static enum hrtimer_restart timer_function(struct hrtimer * timer) {
     printk(KERN_INFO "++ Alarm manager: target time reached!\n");
     alarm_triggered = true;
+    return HRTIMER_NORESTART;
 }
 
 time64_t get_current_time(void) {
 	return ktime_get_real_seconds() + 3600 * 3;
 }
 
-static int alarm_thread_func(void *data) {
+static void setup_alarm(void) {
 	time64_t delay, now;
+	static ktime_t kt_periode;
 	
     now = get_current_time();
-    if (now >= args->t) {
+    if (now >= args.t) {
         printk(KERN_INFO "++ alarm_thread_func: attempt to plan on a past time\n");
-        return -EFAULT;
+        return;
     }
-    delay = args->t - now;
-    printk(KERN_INFO "++ Alarm will be triggered after %llu\n", delay);
+    delay = args.t - now;
     alarm_triggered = false;
-    mdelay(delay * 1000);
-    exec_task();
-    return 0;
+    
+    kt_periode = ktime_set(delay, 0);
+	hrtimer_init(&htimer, CLOCK_REALTIME, HRTIMER_MODE_REL);
+	htimer.function = timer_function;
+	printk(KERN_INFO "++ Alarm will be triggered after %llu\n", delay);
+	hrtimer_start(&htimer, kt_periode, HRTIMER_MODE_REL);
 }
 
 static ssize_t args_write(struct file *f, const char __user *buf, size_t len, loff_t *fpos) {
     if (!alarm_triggered) {
-		kthread_stop(alarm_thread);
-		printk(KERN_INFO "++ previous task canceled: %s\n", args->path);
-		kfree(args);
+		hrtimer_cancel(&htimer);
+		printk(KERN_INFO "++ previous task canceled: %s\n", args.path);
 	}
+	
     if (copy_from_user(args_buffer, buf, len) != 0) {
         printk("++ args_write: copy_from user failed\n");
         return -EFAULT;
     }
     args_buffer[len] = 0;
-    args = unpack_args(args_buffer);
-    alarm_thread = kthread_run(alarm_thread_func, NULL, "alarm_manager_thread");
-    if (IS_ERR(alarm_thread)) {
-        printk(KERN_INFO "++ args_write: failed to create kernel thread\n");
-        alarm_thread = NULL;
-        return len;
-    }
+    if (unpack_args(args_buffer, &args) != 0) {
+		printk(KERN_INFO "++ args_write: unpack_args failed\n");
+	}
+    setup_alarm();
     return len;
 }
 
@@ -80,18 +80,16 @@ static ssize_t args_read(struct file *f, char __user *buf, size_t len, loff_t *f
 	read_flag = true;
 	
     if (alarm_triggered) {
-        printk(KERN_INFO "++ args_read: arguments are not set\n");
-        sprintf(args_buffer, "arguments are not set");
+        sprintf(args_buffer, "arguments are not set\n");
     } else {
-        sprintf(args_buffer, "path=\'%s\', time left: %llu\n", args->path, args->t - get_current_time());
-        printk(KERN_INFO "++ %s", args_buffer);
+        sprintf(args_buffer, "path=\'%s\', time left: %llu\n", args.path, args.t - get_current_time());
     }
+    printk(KERN_INFO "++ %s", args_buffer);
     n = strlen(args_buffer);
     if (copy_to_user(buf, args_buffer, n) != 0) {
         printk(KERN_INFO "++ args_read: copy_to_user failed");
         return -EFAULT;
     }
-    
     return n;
 }
 
@@ -106,12 +104,9 @@ static int args_open(struct inode *ind, struct file *f) {
 }
 
 void free_resources(void) {
-    printk(KERN_INFO "++ free_resources: cleaning alarm args\n");
-    if (args != NULL) {
-        kfree(args);
-        args = NULL;
-    }
-    printk(KERN_INFO "++ free_resources: cleaning proc file system\n");
+	if (!alarm_triggered) {
+		hrtimer_cancel(&htimer);
+	}
     if (proc_file != NULL)
         remove_proc_entry(FILENAME, proc_dir);
     if (proc_dir != NULL)
@@ -139,8 +134,9 @@ static int __init alarm_manager_init(void)
         free_resources();
         return -EFAULT;
     }
-    printk(KERN_INFO "++ Alarm manager is installed!\n");
     alarm_triggered = true;
+    read_flag = false;
+    printk(KERN_INFO "++ Alarm manager is installed!\n");
     return 0;
 }
 

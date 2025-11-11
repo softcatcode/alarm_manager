@@ -1,5 +1,5 @@
-obj-m += am_sleep.o
-am_sleep-objs := am_sleep_main.o unpack_args.o
+obj-m += am_timer.o
+am_timer-objs := am_timer_main.o unpack_args.o
 KERNEL_DIR ?= /lib/modules/$(shell uname -r)/build
 
 all:

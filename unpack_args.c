@@ -79,9 +79,8 @@ static void split_to_arguments(char *arguments, char **path, char **date ,char *
 	*time = arguments;
 }
 
-struct task_args *unpack_args(char *args_line)
+int unpack_args(char *args_line, struct alarm_args *result)
 {
-	struct task_args *result;
 	size_t path_len;
 	char *path_arg;
 	char *date_arg;
@@ -89,17 +88,12 @@ struct task_args *unpack_args(char *args_line)
 	struct tm tm;
 	
     if (!args_line)
-        return NULL;
-    result = kmalloc(sizeof(*result), GFP_KERNEL);
-    if (!result) {
-        printk(KERN_INFO "++ unpack_args: failed to allocate memory for task_args\n");
-        return NULL;
-    }
+        return 1;
 
     split_to_arguments(args_line, &path_arg, &date_arg, &time_arg);
     if (path_arg == NULL || date_arg == NULL || time_arg == NULL) {
 		printk(KERN_INFO "++ unpack_args: arguments format is incorrect\n");
-		goto fail;
+		return 1;
 	}
 	
 	path_len = strnlen(path_arg, PATH_LEN);
@@ -109,23 +103,19 @@ struct task_args *unpack_args(char *args_line)
     memset(&tm, 0, sizeof(struct tm));
     if (parse_date(date_arg, &tm) != 0) {
         printk(KERN_INFO "++ unpack_args: date format is incorrect\n");
-        goto fail;
+        return 1;
     }
     if (parse_time(time_arg, &tm) != 0) {
         printk(KERN_INFO "++ unpack_args: invalid time format (expected HH:MM:SS)\n");
-        goto fail;
+        return 1;
     }
     
     result->t = mktime64(tm.tm_year, tm.tm_mon, tm.tm_mday,
                          tm.tm_hour, tm.tm_min, tm.tm_sec);
     if (result->t < 0) {
         printk(KERN_INFO "++ unpack_args: mktime64 failed (invalid date/time)\n");
-        goto fail;
+        return 1;
     }
 
-    return result;
-
-fail:
-    kfree(result);
-    return NULL;
+    return 0;
 }
